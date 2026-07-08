@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ImageJ 自动化荧光检测</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f5f7f8;
+  --panel: #ffffff;
+  --text: #111827;
+  --muted: #5b6472;
+  --line: #d8dde5;
+  --red: #b42318;
+  --green: #15803d;
+  --accent: #1d4ed8;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+header {
+  height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 28px;
+  border-bottom: 1px solid var(--line);
+  background: #fff;
+}
+h1 { font-size: 22px; margin: 0; letter-spacing: 0; }
+main {
+  display: grid;
+  grid-template-columns: minmax(360px, 520px) minmax(420px, 1fr);
+  gap: 18px;
+  padding: 18px;
+}
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 18px;
+}
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+label { display: block; font-size: 13px; font-weight: 700; margin: 0 0 6px; }
+input, select, textarea, button {
+  width: 100%;
+  font: inherit;
+  border-radius: 6px;
+}
+input, select, textarea {
+  border: 1px solid #c7cdd7;
+  background: #fff;
+  color: var(--text);
+  padding: 10px 11px;
+}
+textarea { min-height: 142px; resize: vertical; line-height: 1.45; }
+input[type=file] { padding: 8px; }
+input[type=checkbox] { width: auto; }
+.checkline { display: flex; gap: 9px; align-items: flex-start; font-size: 13px; font-weight: 700; }
+.checkline input { margin-top: 2px; }
+.field { margin-bottom: 14px; }
+.hint { color: var(--muted); font-size: 12px; margin-top: 6px; line-height: 1.4; }
+button {
+  border: 0;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 700;
+  padding: 12px 14px;
+  cursor: pointer;
+}
+button:disabled { opacity: .55; cursor: wait; }
+.status {
+  min-height: 220px;
+  background: #0b1220;
+  color: #e5edf8;
+  border-radius: 8px;
+  padding: 14px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}
+table { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 12px; }
+th, td { border-bottom: 1px solid var(--line); padding: 9px 7px; text-align: right; }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--muted); font-size: 12px; }
+.paths { font-size: 13px; line-height: 1.65; word-break: break-all; }
+.badge { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.dot { width: 10px; height: 10px; border-radius: 999px; display: inline-block; }
+.red { background: var(--red); }
+.green { background: var(--green); }
+.trend {
+  margin: 10px 0 8px;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.trend.ok { background: #ecfdf5; color: #065f46; }
+.trend.warning { background: #fffbeb; color: #92400e; }
+@media (max-width: 920px) {
+  main { grid-template-columns: 1fr; }
+}
+</style>
+<body>
+<header>
+  <h1>ImageJ 自动化荧光检测</h1>
+  <div class="badge"><span class="dot red"></span>Dead / PI red <span class="dot green"></span>Live / Calcein green</div>
+</header>
+<main>
+  <section class="panel">
+    <form id="runForm">
+      <div class="field">
+        <label for="pptx">PPTX</label>
+        <input id="pptx" name="pptx" type="file" accept=".pptx" required>
+      </div>
+      <div class="field">
+        <label for="output_dir">输出路径</label>
+        <input id="output_dir" name="output_dir" type="text" value="__DEFAULT_OUTPUT__" required>
+      </div>
+      <div class="grid">
+        <div class="field">
+          <label for="threshold_method">自动阈值方法</label>
+          <select id="threshold_method" name="threshold_method">
+            <option>Otsu</option>
+            <option>Default</option>
+            <option>Triangle</option>
+            <option>Huang</option>
+            <option>Moments</option>
+            <option>Yen</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="min_threshold">最低阈值</label>
+          <input id="min_threshold" name="min_threshold" type="number" min="0" max="254" value="8">
+        </div>
+      </div>
+      <div class="grid">
+        <div class="field">
+          <label for="threshold_scope">阈值范围</label>
+          <select id="threshold_scope" name="threshold_scope">
+            <option value="fixed" selected>整批固定阈值</option>
+            <option value="per_image_otsu">每张图片独立Otsu</option>
+            <option value="control_fixed">对照组阈值应用整批</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="dead_percent_mode">Dead % 计算方式</label>
+          <select id="dead_percent_mode" name="dead_percent_mode">
+            <option value="intensity_ratio" selected>校正强度比例</option>
+            <option value="cell_count">细胞计数（实验性）</option>
+          </select>
+          <div class="hint">默认使用强度比例；PBMC混合时报告会保留提示。</div>
+        </div>
+      </div>
+      <div class="grid">
+        <div class="field">
+          <label for="red_fixed_threshold">红色固定阈值</label>
+          <input id="red_fixed_threshold" name="red_fixed_threshold" type="number" min="0" max="254" value="80">
+        </div>
+        <div class="field">
+          <label for="green_fixed_threshold">绿色固定阈值</label>
+          <input id="green_fixed_threshold" name="green_fixed_threshold" type="number" min="0" max="254" value="80">
+        </div>
+      </div>
+      <div class="grid">
+        <label class="checkline" for="use_min_threshold">
+          <input id="use_min_threshold" name="use_min_threshold" type="checkbox" value="1" checked>
+          <span>启用最低阈值限制</span>
+        </label>
+        <label class="checkline" for="background_subtraction">
+          <input id="background_subtraction" name="background_subtraction" type="checkbox" value="1" checked>
+          <span>红绿通道独立背景扣除</span>
+        </label>
+      </div>
+      <div class="field">
+        <label class="checkline" for="show_threshold_preview">
+          <input id="show_threshold_preview" name="show_threshold_preview" type="checkbox" value="1">
+          <span>导出阈值预览/日志</span>
+        </label>
+      </div>
+      <div class="field">
+        <label for="order">图片顺序</label>
+        <select id="order" name="order">
+          <option value="red,green,merge">红 / 绿 / 合并</option>
+          <option value="green,red,merge">绿 / 红 / 合并</option>
+          <option value="red,merge,green">红 / 合并 / 绿</option>
+          <option value="green,merge,red">绿 / 合并 / 红</option>
+        </select>
+      </div>
+      <div class="grid">
+        <div class="field">
+          <label for="replicates_per_group">每组重复次数</label>
+          <input id="replicates_per_group" name="replicates_per_group" type="number" min="3" step="1" value="3">
+          <div class="hint">不少于 3；用于计算组 mean 和 SD。</div>
+        </div>
+        <div class="field">
+          <label for="roi_per_replicate">每个重复ROI数</label>
+          <input id="roi_per_replicate" name="roi_per_replicate" type="number" min="1" step="1" value="3">
+          <div class="hint">同一重复内先平均 ROI，再进入组统计。</div>
+        </div>
+      </div>
+      <div class="field">
+        <label for="expected_trend">用户预期趋势</label>
+        <select id="expected_trend" name="expected_trend">
+          <option value="none" selected>不进行趋势判断</option>
+          <option value="pbmc_dead_increase">按PBMC状态分别判断Dead %递增</option>
+          <option value="pbmc_dead_decrease">按PBMC状态分别判断Dead %递减</option>
+          <option value="custom">自定义组内顺序</option>
+        </select>
+        <div class="hint">趋势检查只用于提示，不会修改原始数据、阈值或计算结果。</div>
+      </div>
+      <div class="field">
+        <div class="hint">程序会分别比较无PBMC组：CON → AUR2 uM → AUR4 uM，以及PBMC组：CON+PBMC → AUR(2uM)+PBMC → AUR(4uM)+PBMC。</div>
+      </div>
+      <div class="field">
+        <label for="group_names">分组名称</label>
+        <textarea id="group_names" name="group_names" spellcheck="false">CON
+AUR2 uM
+AUR4 uM
+CON+PBMC
+AUR(2uM)+PBMC
+AUR(4uM)+PBMC</textarea>
+        <div class="hint">每行一个名称；为空时自动命名。</div>
+      </div>
+      <div class="field">
+        <label for="fiji_path">Fiji/ImageJ 路径</label>
+        <input id="fiji_path" name="fiji_path" type="text" placeholder="留空自动寻找 /usr/local/bin/fiji">
+      </div>
+      <button id="runButton" type="submit">开始检测</button>
+    </form>
+  </section>
+  <section class="panel">
+    <div id="status" class="status">等待上传 PPTX。</div>
+    <div id="result"></div>
+  </section>
+</main>
+<script>
+const form = document.getElementById("runForm");
+const button = document.getElementById("runButton");
+const statusBox = document.getElementById("status");
+const resultBox = document.getElementById("result");
+
+function setStatus(text) {
+  statusBox.textContent = text;
+}
+
+function formatMeanSd(mean, sd, digits) {
+  const left = Number.isFinite(Number(mean)) ? Number(mean).toFixed(digits) : "";
+  const right = Number.isFinite(Number(sd)) ? Number(sd).toFixed(digits) : "";
+  return `${left} ± ${right}`;
+}
+
+function formatNumber(value, digits) {
+  return Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : "";
+}
+
+function renderResult(payload) {
+  const result = payload.result;
+  const summaryRows = result.summary.map(row => `
+    <tr>
+      <td>${row.group}</td>
+      <td>${row.replicate_count_label}</td>
+      <td>${formatMeanSd(row.red_green_ratio_mean, row.red_green_ratio_sd, 4)}</td>
+      <td>${formatMeanSd(row.dead_percent_mean, row.dead_percent_sd, 2)}</td>
+      <td>${formatMeanSd(row.live_percent_mean, row.live_percent_sd, 2)}</td>
+    </tr>`).join("");
+  const repeatRows = result.repeat_level.map(row => `
+    <tr>
+      <td>${row.group}</td>
+      <td>${row.replicate}</td>
+      <td>${row.valid_roi_count}</td>
+      <td>${formatNumber(row.red_green_ratio, 4)}</td>
+      <td>${formatNumber(row.dead_percent, 2)}</td>
+      <td>${formatNumber(row.live_percent, 2)}</td>
+    </tr>`).join("");
+  const measurementRows = result.measurements.map(row => `
+    <tr>
+      <td>${row.group}</td>
+      <td>${row.replicate || "单次"}</td>
+      <td>${row.display_group}</td>
+      <td>${row.roi_x || ""}</td>
+      <td>${row.roi_y || ""}</td>
+      <td>${row.roi_radius || ""}</td>
+      <td>${formatNumber(row.red_green_ratio, 4)}</td>
+      <td>${formatNumber(row.dead_percent, 2)}</td>
+      <td>${formatNumber(row.live_percent, 2)}</td>
+    </tr>`).join("");
+  const trendClass = result.trend.passed ? "ok" : "warning";
+  const trendPrefix = `用户选择：${result.trend.selected_label}；`;
+  const trendDetail = result.trend.message.startsWith(trendPrefix)
+    ? result.trend.message.slice(trendPrefix.length)
+    : result.trend.message;
+  resultBox.innerHTML = `
+    <h2>结果</h2>
+    <div class="hint">${result.replicates_per_group_label}；${result.roi_per_replicate_label}</div>
+    <div class="trend ${trendClass}"><b>用户选择：</b>${result.trend.selected_label}<br><b>检查结果：</b>${trendDetail}</div>
+    <table>
+      <thead><tr><th>实验组</th><th>重复次数</th><th>Red/Green mean ± SD</th><th>Dead % mean ± SD</th><th>Live % mean ± SD</th></tr></thead>
+      <tbody>${summaryRows}</tbody>
+    </table>
+    <h2>三组重复均值</h2>
+    <table>
+      <thead><tr><th>实验组</th><th>重复编号</th><th>有效ROI数</th><th>Red/Green</th><th>Dead %</th><th>Live %</th></tr></thead>
+      <tbody>${repeatRows}</tbody>
+    </table>
+    <h2>ROI 明细</h2>
+    <table>
+      <thead><tr><th>实验组</th><th>重复编号</th><th>原始标签</th><th>ROI x</th><th>ROI y</th><th>ROI radius</th><th>Red/Green</th><th>Dead %</th><th>Live %</th></tr></thead>
+      <tbody>${measurementRows}</tbody>
+    </table>
+    <h2>文件</h2>
+    <div class="paths">
+      <b>结果文件夹：</b>${result.run_dir}<br>
+      <b>Excel：</b>${result.files.excel}<br>
+      <b>报告：</b>${result.files.report}<br>
+      <b>ROI明细 CSV：</b>${result.files.roi_level_csv}<br>
+      <b>重复均值 CSV：</b>${result.files.repeat_level_csv}<br>
+      <b>组汇总 CSV：</b>${result.files.group_summary_csv}<br>
+      <b>阈值日志 CSV：</b>${result.files.threshold_log_csv}<br>
+      <b>QC报告 CSV：</b>${result.files.qc_report_csv}<br>
+      <b>Prism：</b>${result.files.prism_dir}<br>
+      <b>图：</b>${result.files.figures_dir}
+    </div>`;
+}
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  resultBox.innerHTML = "";
+  button.disabled = true;
+  setStatus("正在上传并调用 ImageJ，请等待...");
+  try {
+    const response = await fetch("/api/run", { method: "POST", body: new FormData(form) });
+    const payload = await response.json();
+    if (!payload.ok) {
+      setStatus(`失败：${payload.error}\n\n${payload.traceback || ""}`);
+      return;
+    }
+    setStatus(payload.logs.join("\n"));
+    renderResult(payload);
+  } catch (error) {
+    setStatus(`请求失败：${error}`);
+  } finally {
+    button.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

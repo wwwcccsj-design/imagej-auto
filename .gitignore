@@ -1,0 +1,36 @@
+# macOS / editor
+.DS_Store
+*.swp
+*.swo
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Runtime outputs
+outputs/
+imagej_run_*/
+imagej_upload_*/
+
+# Local logs and generated data
+*.log
+*.tmp
+*.bak
+
+# Large local documents and archives, unless explicitly added
+*.pptx
+*.ppt
+*.zip
+*.tar
+*.tar.gz
