@@ -414,4 +414,6 @@ python3 -m pytest -q
 
 ## License
 
-当前仓库尚未声明开源许可证。社区使用、二次分发或商用前，请先由仓库维护者补充 LICENSE 文件。
+## License
+
+本项目基于 MIT License 开源，详情请查看 [LICENSE](./LICENSE) 文件。
