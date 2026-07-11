@@ -131,6 +131,8 @@ class PipelineOptions:
     replicates_per_group: int = 3
     roi_per_replicate: int = 3
     expected_trend: str = "none"
+    trend_min_value: float | None = None
+    trend_max_value: float | None = None
     threshold_scope: str = "fixed"
     red_fixed_threshold: int = 80
     green_fixed_threshold: int = 80

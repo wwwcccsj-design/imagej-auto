@@ -12,7 +12,7 @@ from typing import Callable
 from .grouping import build_triplets, parse_group_names, parse_order, parse_replicates_per_group
 from .imagej_macro import build_macro
 from .imagej_runner import run_imagej_macro
-from .models import CalculatedMeasurement, PipelineOptions
+from .models import CalculatedMeasurement, PipelineOptions, RawMeasurement
 from .ppt_extractor import extract_ppt_images
 from .report_builder import (
     build_all_reports,
@@ -40,7 +40,7 @@ def _split_replicate_group(group: str) -> tuple[str, str]:
 
 
 def _round_or_none(value: float, digits: int) -> float | None:
-    if isinstance(value, float) and math.isnan(value):
+    if isinstance(value, float) and not math.isfinite(value):
         return None
     return round(value, digits)
 
@@ -51,6 +51,62 @@ def _has_mixed_pbmc_groups(groups: list[str]) -> bool:
     return has_pbmc and has_no_pbmc
 
 
+SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
+
+
+def copy_image_inputs(image_paths: list[str | Path], extracted_dir: str | Path) -> list[Path]:
+    if len(image_paths) < 3:
+        raise ValueError("直接上传图片至少需要3张，按红/绿/合并三张组成一组。")
+    destination = Path(extracted_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    copied: list[Path] = []
+    for index, source_value in enumerate(image_paths, start=1):
+        source = Path(source_value).expanduser()
+        suffix = source.suffix.lower()
+        if suffix not in SUPPORTED_IMAGE_EXTENSIONS:
+            raise ValueError(f"不支持的图片格式: {source.name}")
+        target = destination / f"image{index:04d}{suffix}"
+        shutil.copy2(source, target)
+        copied.append(target)
+    return copied
+
+
+def validate_threshold_results(raw: list[RawMeasurement], options: PipelineOptions) -> dict[str, object]:
+    if not raw:
+        raise ValueError("没有可验证的阈值结果。")
+    red_values = sorted({row.red_threshold_otsu for row in raw})
+    green_values = sorted({row.green_threshold_otsu for row in raw})
+    if any(value < 0 or value > 254 for value in red_values + green_values):
+        raise RuntimeError("ImageJ 导出的阈值超出0-254范围。")
+
+    validation: dict[str, object] = {
+        "passed": True,
+        "scope": options.threshold_scope,
+        "red_values": red_values,
+        "green_values": green_values,
+        "message": "阈值已由 ImageJ 写入逐ROI结果。",
+    }
+    if options.threshold_scope == "fixed":
+        expected_red = max(options.red_fixed_threshold, options.min_threshold) if options.use_min_threshold else options.red_fixed_threshold
+        expected_green = max(options.green_fixed_threshold, options.min_threshold) if options.use_min_threshold else options.green_fixed_threshold
+        passed = red_values == [expected_red] and green_values == [expected_green]
+        validation.update(
+            {
+                "passed": passed,
+                "expected_red": expected_red,
+                "expected_green": expected_green,
+                "message": (
+                    f"固定阈值验证通过：Red={expected_red}, Green={expected_green}。"
+                    if passed
+                    else f"固定阈值未生效：期望 Red={expected_red}, Green={expected_green}；实际 Red={red_values}, Green={green_values}。"
+                ),
+            }
+        )
+        if not passed:
+            raise RuntimeError(str(validation["message"]))
+    return validation
+
+
 def build_result_payload(
     run_dir: str | Path,
     raw_csv: str | Path,
@@ -58,12 +114,20 @@ def build_result_payload(
     replicates_per_group: int,
     expected_trend: str,
     roi_per_replicate: int = 3,
+    trend_min_value: float | None = None,
+    trend_max_value: float | None = None,
+    threshold_validation: dict[str, object] | None = None,
 ) -> dict[str, object]:
     run_dir_path = Path(run_dir)
     raw_csv_path = Path(raw_csv)
     repeat_rows = summarize_repeats(calculated)
     summaries = summarize_replicates(calculated)
-    trend_check = check_expected_trend(summaries, expected_trend)
+    trend_check = check_expected_trend(
+        summaries,
+        expected_trend,
+        min_value=trend_min_value,
+        max_value=trend_max_value,
+    )
     return {
         "run_dir": str(run_dir_path),
         "groups": len(summaries),
@@ -121,9 +185,12 @@ def build_result_payload(
             "metric_label": trend_check.metric_label,
             "direction_label": trend_check.direction_label,
             "passed": trend_check.passed,
+            "min_value": trend_min_value,
+            "max_value": trend_max_value,
             "message": trend_check.message,
             "points": [{"group": point.group, "value": _round_or_none(point.value, 4)} for point in trend_check.points],
         },
+        "threshold_validation": threshold_validation or {},
         "files": {
             "excel": str(run_dir_path / "AUR_ImageJ_fluorescence_formula_results.xlsx"),
             "report": str(run_dir_path / "report.html"),
@@ -143,22 +210,44 @@ def build_result_payload(
     }
 
 
-def run_pipeline(pptx_path: str | Path, output_root: str | Path, options: PipelineOptions, log: LogFn | None = None) -> dict[str, object]:
-    pptx = Path(pptx_path).expanduser()
+def _new_run_dir(output_root: str | Path) -> Path:
     output_root_path = Path(output_root).expanduser()
-    selected_trend_label = describe_expected_trend(options.expected_trend)
     output_root_path.mkdir(parents=True, exist_ok=True)
-    run_dir = output_root_path / f"imagej_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = output_root_path / f"imagej_run_{timestamp}"
+    counter = 1
+    while run_dir.exists():
+        run_dir = output_root_path / f"imagej_run_{timestamp}_{counter}"
+        counter += 1
     run_dir.mkdir(parents=True, exist_ok=False)
+    return run_dir
 
-    _log(log, f"创建结果文件夹: {run_dir}")
+
+def _run_prepared_images(
+    run_dir: Path,
+    extracted_dir: Path,
+    images: list[Path],
+    options: PipelineOptions,
+    input_type: str,
+    log: LogFn | None = None,
+) -> dict[str, object]:
+    if options.threshold_scope not in {"fixed", "per_image_otsu", "control_fixed"}:
+        raise ValueError("阈值范围选项无效。")
+    if not 0 <= options.red_fixed_threshold <= 254 or not 0 <= options.green_fixed_threshold <= 254:
+        raise ValueError("红色和绿色固定阈值必须在0到254之间。")
+    if options.trend_min_value is not None and not 0 <= options.trend_min_value <= 100:
+        raise ValueError("趋势最小值必须在0到100之间。")
+    if options.trend_max_value is not None and not 0 <= options.trend_max_value <= 100:
+        raise ValueError("趋势最大值必须在0到100之间。")
+    if (
+        options.trend_min_value is not None
+        and options.trend_max_value is not None
+        and options.trend_min_value > options.trend_max_value
+    ):
+        raise ValueError("趋势最小值不能大于最大值。")
+    selected_trend_label = describe_expected_trend(options.expected_trend)
+
     _log(log, f"用户预期趋势: {selected_trend_label}")
-    copied_pptx = run_dir / "uploaded.pptx"
-    shutil.copy2(pptx, copied_pptx)
-
-    extracted_dir = run_dir / "extracted_images"
-    images = extract_ppt_images(copied_pptx, extracted_dir)
-    _log(log, f"已提取图片: {len(images)} 张")
     if len(images) % 3:
         _log(log, f"提示: 图片数量不是 3 的倍数，末尾 {len(images) % 3} 张未参与分组。")
 
@@ -209,6 +298,8 @@ def run_pipeline(pptx_path: str | Path, output_root: str | Path, options: Pipeli
     run_imagej_macro(macro_path, extracted_dir, run_dir, fiji_path=options.fiji_path)
     raw_csv = run_dir / "imagej_raw_measurements.csv"
     raw = parse_raw_measurements(raw_csv)
+    threshold_validation = validate_threshold_results(raw, options)
+    _log(log, str(threshold_validation["message"]))
     calculated = build_all_reports(
         raw,
         run_dir,
@@ -228,6 +319,10 @@ def run_pipeline(pptx_path: str | Path, output_root: str | Path, options: Pipeli
             "group_names": options.group_names,
             "order": options.order,
             "pbmc_warning": pbmc_warning,
+            "input_type": input_type,
+            "trend_min_value": options.trend_min_value,
+            "trend_max_value": options.trend_max_value,
+            "threshold_validation": threshold_validation,
         },
     )
     result = build_result_payload(
@@ -237,11 +332,46 @@ def run_pipeline(pptx_path: str | Path, output_root: str | Path, options: Pipeli
         options.replicates_per_group,
         options.expected_trend,
         roi_per_replicate=options.roi_per_replicate,
+        trend_min_value=options.trend_min_value,
+        trend_max_value=options.trend_max_value,
+        threshold_validation=threshold_validation,
     )
+    result["input_type"] = input_type
     _log(log, "Excel、Prism 数据、SVG 图和 HTML 报告已生成")
     _log(log, f"趋势检查: {result['trend']['message']}")  # type: ignore[index]
     (run_dir / "pipeline_result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
+
+
+def run_pipeline(pptx_path: str | Path, output_root: str | Path, options: PipelineOptions, log: LogFn | None = None) -> dict[str, object]:
+    pptx = Path(pptx_path).expanduser()
+    run_dir = _new_run_dir(output_root)
+    _log(log, f"创建结果文件夹: {run_dir}")
+    copied_pptx = run_dir / "uploaded.pptx"
+    shutil.copy2(pptx, copied_pptx)
+    extracted_dir = run_dir / "extracted_images"
+    images = extract_ppt_images(copied_pptx, extracted_dir)
+    _log(log, f"已从 PPTX 提取图片: {len(images)} 张")
+    return _run_prepared_images(run_dir, extracted_dir, images, options, input_type="pptx", log=log)
+
+
+def run_pipeline_from_images(
+    image_paths: list[str | Path],
+    output_root: str | Path,
+    options: PipelineOptions,
+    log: LogFn | None = None,
+) -> dict[str, object]:
+    run_dir = _new_run_dir(output_root)
+    _log(log, f"创建结果文件夹: {run_dir}")
+    extracted_dir = run_dir / "extracted_images"
+    copied = copy_image_inputs(image_paths, extracted_dir)
+    manifest = [
+        {"order": index, "source_name": Path(source).name, "stored_name": target.name}
+        for index, (source, target) in enumerate(zip(image_paths, copied), start=1)
+    ]
+    (run_dir / "input_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    _log(log, f"已接收直接上传图片: {len(copied)} 张")
+    return _run_prepared_images(run_dir, extracted_dir, copied, options, input_type="images", log=log)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -255,6 +385,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--replicates-per-group", default="3", help="每个实验组的重复次数，不能少于 3")
     parser.add_argument("--roi-per-replicate", type=int, default=3, help="每个生物学重复内测量的 ROI 数")
     parser.add_argument("--expected-trend", default="none", help="预期趋势检查，例如 pbmc_dead_increase；只提示，不改数据")
+    parser.add_argument("--trend-min-value", type=float, default=None, help="Dead %趋势范围最小值，仅检查不修改数据")
+    parser.add_argument("--trend-max-value", type=float, default=None, help="Dead %趋势范围最大值，仅检查不修改数据")
     parser.add_argument("--threshold-scope", default="fixed", choices=["per_image_otsu", "fixed", "control_fixed"])
     parser.add_argument("--red-fixed-threshold", type=int, default=80)
     parser.add_argument("--green-fixed-threshold", type=int, default=80)
@@ -273,6 +405,8 @@ def main(argv: list[str] | None = None) -> int:
         replicates_per_group=parse_replicates_per_group(args.replicates_per_group),
         roi_per_replicate=max(1, args.roi_per_replicate),
         expected_trend=args.expected_trend,
+        trend_min_value=args.trend_min_value,
+        trend_max_value=args.trend_max_value,
         threshold_scope=args.threshold_scope,
         red_fixed_threshold=args.red_fixed_threshold,
         green_fixed_threshold=args.green_fixed_threshold,

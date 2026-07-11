@@ -6,7 +6,7 @@
 
 ## 功能概览
 
-- 从 `.pptx` 中按自然顺序提取图片。
+- 支持上传 `.pptx`，也支持直接一次上传多张 PNG/JPG/TIF/BMP 图片。
 - 按红图、绿图、合并图三张一组形成实验组。
 - 通过 Fiji/ImageJ headless 生成 ROI、mask 和测量 CSV。
 - 支持三种阈值模式：
@@ -114,6 +114,22 @@ image5 = green
 image6 = merge
 ...
 ```
+
+## 直接上传图片
+
+在页面顶部把输入方式切换为 `直接上传图片`，一次选择至少 3 张图片。支持：
+
+```text
+PNG / JPG / JPEG / TIF / TIFF / BMP
+```
+
+程序按上传列表顺序保存为 `image0001`、`image0002`、`image0003` 等，并按每 3 张组成一组。原始文件名和保存顺序会写入：
+
+```text
+input_manifest.json
+```
+
+例如选择 `红图、绿图、合并图` 后，页面的图片顺序应设为 `红 / 绿 / 合并`。直接上传与 PPTX 输入共用同一套 ImageJ 宏、阈值验证、ROI 统计和报告流程。
 
 ## 推荐实验分组格式
 
@@ -261,6 +277,15 @@ green = max(green_corrected, 0)
 
 不符合预期时只给黄色提示，不会判定分析失败。
 
+页面还可以设置 `Dead %范围最小值` 和 `Dead %范围最大值`。范围检查针对实验组 Dead % 均值，只报告哪些组超出范围，不会：
+
+- 修改或裁剪测量值。
+- 删除 ROI 或重复。
+- 调整阈值来满足范围。
+- 把超出范围的值替换成边界值。
+
+结果页面会同时显示趋势检查和阈值验证。固定阈值模式下，程序会读取 ImageJ 实际导出的逐 ROI 阈值；如果实际值与用户设置不一致，本次分析会报错，而不是继续生成看似正常的报告。
+
 ## 输出文件
 
 每次运行会在输出目录下生成：
@@ -274,6 +299,7 @@ imagej_run_YYYYMMDD_HHMMSS/
 | 文件 | 说明 |
 |---|---|
 | `ImageJ_fluorescence_quantification.ijm` | 本次运行生成的 ImageJ 宏 |
+| `input_manifest.json` | 直接上传图片时的原始文件名和顺序 |
 | `imagej_raw_measurements.csv` | ImageJ 原始 ROI 测量结果 |
 | `roi_level_results.csv` | ROI 级计算结果 |
 | `repeat_level_results.csv` | 生物学重复级均值 |
@@ -411,8 +437,6 @@ python3 -m pytest -q
 - PBMC 混合样本是否引入背景/密度偏差。
 - 阈值是否适合当前实验批次。
 - QC 报告中的警告是否影响结论。
-
-## License
 
 ## License
 

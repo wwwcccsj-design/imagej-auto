@@ -383,12 +383,59 @@ def _pbmc_segment_message(bucket: str, points: list[TrendPoint], increasing: boo
     return passed, f"{bucket}: {joined}；{status}{direction}{detail}。"
 
 
-def check_expected_trend(summaries: list[ReplicateSummary], expected_trend: str) -> TrendCheck:
+def _apply_trend_bounds(
+    check: TrendCheck,
+    summaries: list[ReplicateSummary],
+    min_value: float | None,
+    max_value: float | None,
+) -> TrendCheck:
+    if min_value is None and max_value is None:
+        return check
+    if min_value is not None and not 0 <= min_value <= 100:
+        raise ValueError("趋势最小值必须在0到100之间。")
+    if max_value is not None and not 0 <= max_value <= 100:
+        raise ValueError("趋势最大值必须在0到100之间。")
+    if min_value is not None and max_value is not None and min_value > max_value:
+        raise ValueError("趋势最小值不能大于最大值。")
+
+    range_points = [TrendPoint(row.group, row.dead_percent_mean) for row in summaries]
+    violations: list[str] = []
+    for point in range_points:
+        if math.isnan(point.value):
+            violations.append(f"{point.group}=NA")
+        elif min_value is not None and point.value < min_value:
+            violations.append(f"{point.group}={point.value:.2f}<最小值{min_value:.2f}")
+        elif max_value is not None and point.value > max_value:
+            violations.append(f"{point.group}={point.value:.2f}>最大值{max_value:.2f}")
+    bounds = f"[{min_value if min_value is not None else '-∞'}, {max_value if max_value is not None else '+∞'}]"
+    range_passed = not violations
+    range_message = (
+        f"Dead %范围检查{bounds}通过。"
+        if range_passed
+        else f"Dead %范围检查{bounds}未通过：" + "；".join(violations) + "。"
+    )
+    return TrendCheck(
+        check.expected_trend,
+        check.selected_label,
+        check.metric_label or "Dead %",
+        check.direction_label,
+        check.passed and range_passed,
+        check.points or range_points,
+        f"{check.message} {range_message} 范围检查仅用于提示，不会优化、裁剪或修改数据。",
+    )
+
+
+def check_expected_trend(
+    summaries: list[ReplicateSummary],
+    expected_trend: str,
+    min_value: float | None = None,
+    max_value: float | None = None,
+) -> TrendCheck:
     if expected_trend not in TREND_OPTIONS:
         raise ValueError("预期趋势选项无效。")
     selected_label, metric_label, direction_label = TREND_OPTIONS[expected_trend]
     if expected_trend == "none":
-        return TrendCheck(
+        check = TrendCheck(
             expected_trend,
             selected_label,
             metric_label,
@@ -397,11 +444,10 @@ def check_expected_trend(summaries: list[ReplicateSummary], expected_trend: str)
             [],
             f"用户选择：{selected_label}；未进行趋势判断。{NO_MUTATION_NOTICE}",
         )
-
-    if expected_trend == "custom":
+    elif expected_trend == "custom":
         points = [TrendPoint(row.group, row.dead_percent_mean) for row in summaries]
         joined = " -> ".join(f"{point.group}: {point.value:.2f}" if not math.isnan(point.value) else f"{point.group}: NA" for point in points)
-        return TrendCheck(
+        check = TrendCheck(
             expected_trend,
             selected_label,
             metric_label,
@@ -410,29 +456,29 @@ def check_expected_trend(summaries: list[ReplicateSummary], expected_trend: str)
             points,
             f"用户选择：{selected_label}；按当前分组输入顺序仅显示Dead %：{joined}。{NO_MUTATION_NOTICE}",
         )
+    else:
+        increasing = expected_trend == "pbmc_dead_increase"
+        buckets = _ordered_pbmc_points(summaries)
+        messages: list[str] = []
+        passed_values: list[bool] = []
+        points = []
+        for bucket in ("无PBMC", "PBMC"):
+            segment_points = buckets[bucket]
+            points.extend(segment_points)
+            passed, message = _pbmc_segment_message(bucket, segment_points, increasing)
+            passed_values.append(passed)
+            messages.append(message)
 
-    increasing = expected_trend == "pbmc_dead_increase"
-    buckets = _ordered_pbmc_points(summaries)
-    messages: list[str] = []
-    passed_values: list[bool] = []
-    points: list[TrendPoint] = []
-    for bucket in ("无PBMC", "PBMC"):
-        segment_points = buckets[bucket]
-        points.extend(segment_points)
-        passed, message = _pbmc_segment_message(bucket, segment_points, increasing)
-        passed_values.append(passed)
-        messages.append(message)
-
-    passed = all(passed_values)
-    return TrendCheck(
-        expected_trend,
-        selected_label,
-        metric_label,
-        "递增" if increasing else "递减",
-        passed,
-        points,
-        f"用户选择：{selected_label}；" + " ".join(messages) + f" {NO_MUTATION_NOTICE}",
-    )
+        check = TrendCheck(
+            expected_trend,
+            selected_label,
+            metric_label,
+            "递增" if increasing else "递减",
+            all(passed_values),
+            points,
+            f"用户选择：{selected_label}；" + " ".join(messages) + f" {NO_MUTATION_NOTICE}",
+        )
+    return _apply_trend_bounds(check, summaries, min_value, max_value)
 
 
 def _fmt(value: float, digits: int = 6) -> str:
@@ -930,7 +976,12 @@ def build_all_reports(
     calculated = calculate_all(raw)
     repeats = summarize_repeats(calculated)
     summaries = summarize_replicates(calculated)
-    trend_check = check_expected_trend(summaries, expected_trend)
+    trend_check = check_expected_trend(
+        summaries,
+        expected_trend,
+        min_value=(analysis_settings or {}).get("trend_min_value"),  # type: ignore[arg-type]
+        max_value=(analysis_settings or {}).get("trend_max_value"),  # type: ignore[arg-type]
+    )
     write_calculated_csv(calculated, out)
     write_roi_level_csv(calculated, out)
     write_repeat_level_csv(repeats, out)

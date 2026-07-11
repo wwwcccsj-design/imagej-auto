@@ -9,8 +9,13 @@ from unittest.mock import patch
 from imagej_auto.grouping import build_triplets, parse_replicates_per_group
 from imagej_auto.imagej_macro import build_macro
 from imagej_auto.imagej_runner import run_imagej_macro
-from imagej_auto.models import RawMeasurement
-from imagej_auto.pipeline import build_result_payload
+from imagej_auto.models import PipelineOptions, RawMeasurement, ReplicateSummary
+from imagej_auto.pipeline import (
+    build_result_payload,
+    copy_image_inputs,
+    run_pipeline_from_images,
+    validate_threshold_results,
+)
 from imagej_auto.ppt_extractor import natural_key
 from imagej_auto.report_builder import (
     calculate_measurement,
@@ -24,6 +29,10 @@ from imagej_auto.report_builder import (
 
 
 class CoreWorkflowTests(unittest.TestCase):
+    @staticmethod
+    def _threshold_raw(red: int = 80, green: int = 80) -> RawMeasurement:
+        return RawMeasurement("CON R1", "r.png", "g.png", "m.png", red, green, 1, 1, 1.0, 1.0)
+
     def test_natural_key_sorts_powerpoint_image_names(self):
         names = ["image10.png", "image2.png", "image1.png", "image16.jpg"]
         self.assertEqual(sorted(names, key=natural_key), ["image1.png", "image2.png", "image10.png", "image16.jpg"])
@@ -51,6 +60,59 @@ class CoreWorkflowTests(unittest.TestCase):
         self.assertEqual(parse_replicates_per_group("3"), 3)
         with self.assertRaises(ValueError):
             parse_replicates_per_group("2")
+
+    def test_direct_image_copy_preserves_selected_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sources = []
+            for index, name in enumerate(("z_red.png", "a_green.jpg", "m_merge.tif"), start=1):
+                path = root / name
+                path.write_bytes(f"source-{index}".encode())
+                sources.append(path)
+            copied = copy_image_inputs(sources, root / "extracted")
+            self.assertEqual([path.name for path in copied], ["image0001.png", "image0002.jpg", "image0003.tif"])
+            self.assertEqual([path.read_bytes() for path in copied], [b"source-1", b"source-2", b"source-3"])
+
+    def test_direct_image_pipeline_uses_shared_analysis_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sources = []
+            for index in range(3):
+                path = root / f"source{index}.png"
+                path.write_bytes(b"image")
+                sources.append(path)
+            with patch("imagej_auto.pipeline._run_prepared_images", return_value={"ok": True}) as run_mock:
+                result = run_pipeline_from_images(sources, root / "out", PipelineOptions())
+            self.assertEqual(result, {"ok": True})
+            self.assertEqual(run_mock.call_args.kwargs["input_type"], "images")
+            self.assertTrue(run_mock.call_args.args[0].joinpath("input_manifest.json").exists())
+
+    def test_fixed_threshold_validation_checks_actual_imagej_values(self):
+        options = PipelineOptions(
+            threshold_scope="fixed",
+            red_fixed_threshold=80,
+            green_fixed_threshold=80,
+            use_min_threshold=False,
+        )
+        validation = validate_threshold_results([self._threshold_raw()], options)
+        self.assertTrue(validation["passed"])
+        self.assertEqual(validation["red_values"], [80])
+        self.assertEqual(validation["green_values"], [80])
+
+        with self.assertRaisesRegex(RuntimeError, "固定阈值未生效"):
+            validate_threshold_results([self._threshold_raw(red=79)], options)
+
+    def test_trend_bounds_warn_without_modifying_summary_values(self):
+        summaries = [
+            ReplicateSummary("CON", 3, 0.2, 0.01, 10.0, 1.0, 90.0, 1.0),
+            ReplicateSummary("AUR2 uM", 3, 0.5, 0.02, 40.0, 2.0, 60.0, 2.0),
+        ]
+        before = [(row.group, row.dead_percent_mean) for row in summaries]
+        check = check_expected_trend(summaries, "none", min_value=20, max_value=60)
+        self.assertFalse(check.passed)
+        self.assertIn("CON=10.00<最小值20.00", check.message)
+        self.assertIn("不会优化、裁剪或修改数据", check.message)
+        self.assertEqual(before, [(row.group, row.dead_percent_mean) for row in summaries])
 
     def test_calculate_measurement_uses_corrected_intensity_for_dead_percent(self):
         raw = RawMeasurement(
