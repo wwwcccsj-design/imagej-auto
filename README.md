@@ -48,7 +48,7 @@
 - Python 3.11 或更新版本
 - Fiji/ImageJ
 
-Python 运行时主要使用标准库；测试需要 `pytest`。
+Python 运行时使用 Pillow 识别和裁剪整版拼图；测试需要 `pytest`。
 
 ### 安装 Fiji/ImageJ
 
@@ -73,6 +73,7 @@ macOS 推荐安装 Fiji，并确保命令行可执行文件存在：
 ```bash
 git clone https://github.com/wwwcccsj-design/imagej-auto.git
 cd imagej-auto
+python3 -m pip install -r requirements.txt
 ```
 
 启动网页：
@@ -117,13 +118,21 @@ image6 = merge
 
 ## 直接上传图片
 
-在页面顶部把输入方式切换为 `直接上传图片`，一次选择至少 3 张图片。支持：
+在页面顶部把输入方式切换为 `直接上传图片`。支持：
 
 ```text
 PNG / JPG / JPEG / TIF / TIFF / BMP
 ```
 
-程序按上传列表顺序保存为 `image0001`、`image0002`、`image0003` 等，并按每 3 张组成一组。原始文件名和保存顺序会写入：
+图片内容布局提供三种模式：
+
+- `自动识别整版拼图`：检测白色间隔分开的实验组列，以及 PI、Calcein-AM、Merge 三行图块。
+- `整版拼图`：强制按列=实验组、行=通道解析；只需上传1张图。
+- `普通图片`：按上传列表顺序每3张组成一组。
+
+对于 6列×3行 的整版图，程序会裁出 18 张图，再按 6 个实验组进入现有 ImageJ 流程。组名使用页面中按行填写的名称，不依赖易出错的 OCR 猜测。检测到多个整版版本时，会选择分辨率最高的可识别图片。
+
+程序会记录原始文件名、检测布局、每个裁剪框和保存顺序：
 
 ```text
 input_manifest.json

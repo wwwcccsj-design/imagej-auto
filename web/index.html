@@ -133,7 +133,16 @@ th { color: var(--muted); font-size: 12px; }
       <div id="imagesField" class="field" hidden>
         <label for="images">多张荧光图片</label>
         <input id="images" name="images" type="file" accept=".png,.jpg,.jpeg,.tif,.tiff,.bmp,image/*" multiple>
-        <div class="hint">按选择顺序每3张组成一组；图片顺序由下方“图片顺序”设置解释。</div>
+        <div class="hint">整版拼图可以只上传1张；普通图片按选择顺序每3张组成一组。</div>
+      </div>
+      <div id="imageLayoutField" class="field" hidden>
+        <label for="image_layout">图片内容布局</label>
+        <select id="image_layout" name="image_layout">
+          <option value="auto" selected>自动识别整版拼图</option>
+          <option value="montage">整版拼图（列=组，行=PI/Calcein/Merge）</option>
+          <option value="triplets">普通图片（三张一组）</option>
+        </select>
+        <div class="hint">自动模式会识别白色间隔分开的多列实验组，并把三行通道裁成独立图片。</div>
       </div>
       <div class="field">
         <label for="output_dir">输出路径</label>
@@ -276,6 +285,7 @@ const statusBox = document.getElementById("status");
 const resultBox = document.getElementById("result");
 const pptxField = document.getElementById("pptxField");
 const imagesField = document.getElementById("imagesField");
+const imageLayoutField = document.getElementById("imageLayoutField");
 const pptxInput = document.getElementById("pptx");
 const imagesInput = document.getElementById("images");
 
@@ -284,6 +294,7 @@ function syncInputMode() {
   const useImages = mode === "images";
   pptxField.hidden = useImages;
   imagesField.hidden = !useImages;
+  imageLayoutField.hidden = !useImages;
   pptxInput.required = !useImages;
   imagesInput.required = useImages;
 }
@@ -344,9 +355,14 @@ function renderResult(payload) {
   const threshold = result.threshold_validation || {};
   const thresholdClass = threshold.passed === false ? "warning" : "ok";
   const thresholdMessage = threshold.message || "未返回阈值验证信息。";
+  const layout = result.image_layout_detection || {};
+  const layoutMessage = layout.mode === "montage"
+    ? `已识别整版拼图：${layout.detected_columns}个实验组 × ${layout.detected_rows}个通道。`
+    : (layout.mode === "triplets" ? `普通图片模式：已接收${layout.uploaded_images}张。` : "");
   resultBox.innerHTML = `
     <h2>结果</h2>
     <div class="hint">${result.replicates_per_group_label}；${result.roi_per_replicate_label}</div>
+    ${layoutMessage ? `<div class="trend ok"><b>图片识别：</b>${layoutMessage}</div>` : ""}
     <div class="trend ${trendClass}"><b>用户选择：</b>${result.trend.selected_label}<br><b>检查结果：</b>${trendDetail}</div>
     <div class="trend ${thresholdClass}"><b>阈值验证：</b>${thresholdMessage}</div>
     <table>
@@ -381,9 +397,13 @@ function renderResult(payload) {
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const mode = form.elements.input_mode.value;
-  if (mode === "images" && imagesInput.files.length < 3) {
-    setStatus("失败：直接上传图片至少需要3张。");
-    return;
+  if (mode === "images") {
+    const layout = document.getElementById("image_layout").value;
+    const minimum = layout === "triplets" ? 3 : 1;
+    if (imagesInput.files.length < minimum) {
+      setStatus(`失败：当前图片布局至少需要${minimum}张图片。`);
+      return;
+    }
   }
   const minValue = document.getElementById("trend_min_value").value;
   const maxValue = document.getElementById("trend_max_value").value;

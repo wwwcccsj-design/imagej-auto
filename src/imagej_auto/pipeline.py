@@ -71,6 +71,116 @@ def copy_image_inputs(image_paths: list[str | Path], extracted_dir: str | Path) 
     return copied
 
 
+def _contiguous_runs(flags: list[bool], minimum_length: int) -> list[tuple[int, int]]:
+    runs: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, active in enumerate(flags + [False]):
+        if active and start is None:
+            start = index
+        elif not active and start is not None:
+            if index - start >= minimum_length:
+                runs.append((start, index))
+            start = None
+    return runs
+
+
+def detect_montage_layout(image_path: str | Path) -> dict[str, object] | None:
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError("整版图片识别需要 Pillow，请运行 python3 -m pip install -r requirements.txt。") from exc
+
+    source = Path(image_path)
+    with Image.open(source) as opened:
+        original_width, original_height = opened.size
+        gray = opened.convert("L")
+        gray.thumbnail((1200, 1200))
+        width, height = gray.size
+        pixels = gray.load()
+
+        x_active = [sum(1 for y in range(height) if pixels[x, y] < 210) / height >= 0.20 for x in range(width)]
+        y_active = [sum(1 for x in range(width) if pixels[x, y] < 210) / width >= 0.20 for y in range(height)]
+        x_runs = _contiguous_runs(x_active, max(8, int(width * 0.06)))
+        y_runs = _contiguous_runs(y_active, max(8, int(height * 0.12)))
+
+    if len(x_runs) < 2 or len(y_runs) != 3:
+        return None
+    scale_x = original_width / width
+    scale_y = original_height / height
+    x_boxes = [(round(start * scale_x), round(end * scale_x)) for start, end in x_runs]
+    y_boxes = [(round(start * scale_y), round(end * scale_y)) for start, end in y_runs]
+    return {
+        "source": str(source),
+        "width": original_width,
+        "height": original_height,
+        "columns": len(x_boxes),
+        "rows": len(y_boxes),
+        "x_boxes": x_boxes,
+        "y_boxes": y_boxes,
+    }
+
+
+def prepare_direct_image_inputs(
+    image_paths: list[str | Path],
+    extracted_dir: str | Path,
+    image_layout: str = "auto",
+) -> tuple[list[Path], dict[str, object]]:
+    if image_layout not in {"auto", "triplets", "montage"}:
+        raise ValueError("图片布局选项无效。")
+    paths = [Path(value).expanduser() for value in image_paths]
+    if not paths:
+        raise ValueError("请至少上传一张图片。")
+    if image_layout == "triplets":
+        copied = copy_image_inputs(paths, extracted_dir)
+        return copied, {"mode": "triplets", "uploaded_images": len(paths)}
+
+    candidates = [layout for path in paths if (layout := detect_montage_layout(path)) is not None]
+    use_montage = image_layout == "montage" or (image_layout == "auto" and bool(candidates))
+    if not use_montage:
+        copied = copy_image_inputs(paths, extracted_dir)
+        return copied, {"mode": "triplets", "uploaded_images": len(paths)}
+    if not candidates:
+        raise ValueError("没有识别到整版拼图。请确认图片包含至少2列实验组和PI/Calcein-AM/Merge三行图块。")
+
+    selected = max(candidates, key=lambda item: (int(item["columns"]), int(item["width"]) * int(item["height"])))
+    source = Path(str(selected["source"]))
+    x_boxes = list(selected["x_boxes"])  # type: ignore[arg-type]
+    y_boxes = list(selected["y_boxes"])  # type: ignore[arg-type]
+    destination = Path(extracted_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    cropped: list[Path] = []
+    panel_records: list[dict[str, object]] = []
+
+    from PIL import Image
+
+    with Image.open(source) as opened:
+        rgb = opened.convert("RGB")
+        for column_index, (left, right) in enumerate(x_boxes, start=1):
+            for row_index, (top, bottom) in enumerate(y_boxes, start=1):
+                target = destination / f"image{len(cropped) + 1:04d}.png"
+                rgb.crop((left, top, right, bottom)).save(target, "PNG")
+                cropped.append(target)
+                panel_records.append(
+                    {
+                        "group_column": column_index,
+                        "channel_row": ("red", "green", "merge")[row_index - 1],
+                        "box": [left, top, right, bottom],
+                        "stored_name": target.name,
+                    }
+                )
+
+    metadata = {
+        "mode": "montage",
+        "source_name": source.name,
+        "uploaded_images": len(paths),
+        "detected_columns": len(x_boxes),
+        "detected_rows": len(y_boxes),
+        "ignored_uploaded_images": [path.name for path in paths if path != source],
+        "panels": panel_records,
+    }
+    return cropped, metadata
+
+
 def validate_threshold_results(raw: list[RawMeasurement], options: PipelineOptions) -> dict[str, object]:
     if not raw:
         raise ValueError("没有可验证的阈值结果。")
@@ -233,6 +343,8 @@ def _run_prepared_images(
 ) -> dict[str, object]:
     if options.threshold_scope not in {"fixed", "per_image_otsu", "control_fixed"}:
         raise ValueError("阈值范围选项无效。")
+    if options.image_layout not in {"auto", "triplets", "montage"}:
+        raise ValueError("图片布局选项无效。")
     if not 0 <= options.red_fixed_threshold <= 254 or not 0 <= options.green_fixed_threshold <= 254:
         raise ValueError("红色和绿色固定阈值必须在0到254之间。")
     if options.trend_min_value is not None and not 0 <= options.trend_min_value <= 100:
@@ -320,6 +432,7 @@ def _run_prepared_images(
             "order": options.order,
             "pbmc_warning": pbmc_warning,
             "input_type": input_type,
+            "image_layout": options.image_layout,
             "trend_min_value": options.trend_min_value,
             "trend_max_value": options.trend_max_value,
             "threshold_validation": threshold_validation,
@@ -364,14 +477,23 @@ def run_pipeline_from_images(
     run_dir = _new_run_dir(output_root)
     _log(log, f"创建结果文件夹: {run_dir}")
     extracted_dir = run_dir / "extracted_images"
-    copied = copy_image_inputs(image_paths, extracted_dir)
-    manifest = [
-        {"order": index, "source_name": Path(source).name, "stored_name": target.name}
-        for index, (source, target) in enumerate(zip(image_paths, copied), start=1)
-    ]
+    copied, layout_metadata = prepare_direct_image_inputs(image_paths, extracted_dir, image_layout=options.image_layout)
+    manifest = {
+        "input_layout": layout_metadata,
+        "uploads": [{"order": index, "source_name": Path(source).name} for index, source in enumerate(image_paths, start=1)],
+    }
     (run_dir / "input_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    _log(log, f"已接收直接上传图片: {len(copied)} 张")
-    return _run_prepared_images(run_dir, extracted_dir, copied, options, input_type="images", log=log)
+    if layout_metadata["mode"] == "montage":
+        _log(
+            log,
+            f"识别到整版拼图: {layout_metadata['detected_columns']} 个实验组 × {layout_metadata['detected_rows']} 个通道，已裁出 {len(copied)} 张图",
+        )
+    else:
+        _log(log, f"已接收直接上传图片: {len(copied)} 张")
+    result = _run_prepared_images(run_dir, extracted_dir, copied, options, input_type="images", log=log)
+    result["image_layout_detection"] = {key: value for key, value in layout_metadata.items() if key != "panels"}
+    (run_dir / "pipeline_result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -407,6 +529,7 @@ def main(argv: list[str] | None = None) -> int:
         expected_trend=args.expected_trend,
         trend_min_value=args.trend_min_value,
         trend_max_value=args.trend_max_value,
+        image_layout="triplets",
         threshold_scope=args.threshold_scope,
         red_fixed_threshold=args.red_fixed_threshold,
         green_fixed_threshold=args.green_fixed_threshold,

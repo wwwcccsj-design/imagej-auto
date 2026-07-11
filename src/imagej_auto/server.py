@@ -100,6 +100,7 @@ class ImageJAutomationHandler(BaseHTTPRequestHandler):
             replicates_per_group = parse_replicates_per_group(form.getfirst("replicates_per_group", "3"))
             roi_per_replicate = max(1, int(form.getfirst("roi_per_replicate", "3")))
             expected_trend = form.getfirst("expected_trend", "none").strip() or "none"
+            image_layout = form.getfirst("image_layout", "auto").strip() or "auto"
             trend_min_value = _optional_percentage(form.getfirst("trend_min_value", ""), "趋势最小值")
             trend_max_value = _optional_percentage(form.getfirst("trend_max_value", ""), "趋势最大值")
             if trend_min_value is not None and trend_max_value is not None and trend_min_value > trend_max_value:
@@ -125,6 +126,7 @@ class ImageJAutomationHandler(BaseHTTPRequestHandler):
                     expected_trend=expected_trend,
                     trend_min_value=trend_min_value,
                     trend_max_value=trend_max_value,
+                    image_layout=image_layout,
                     threshold_scope=threshold_scope,
                     red_fixed_threshold=red_fixed_threshold,
                     green_fixed_threshold=green_fixed_threshold,
@@ -145,12 +147,11 @@ class ImageJAutomationHandler(BaseHTTPRequestHandler):
                     result = run_pipeline(upload_path, output_dir, options, log=logs.append)
                 else:
                     image_items = _uploaded_items(form, "images")
-                    if len(image_items) < 3:
-                        raise ValueError("直接上传图片至少需要3张。")
+                    if not image_items:
+                        raise ValueError("请至少上传一张图片。")
                     uploaded_images: list[Path] = []
                     for index, image_item in enumerate(image_items, start=1):
-                        suffix = Path(image_item.filename).suffix.lower()
-                        upload_path = Path(tmp) / f"upload{index:04d}{suffix}"
+                        upload_path = Path(tmp) / f"upload{index:04d}_{Path(image_item.filename).name}"
                         with upload_path.open("wb") as f:
                             shutil.copyfileobj(image_item.file, f)
                         uploaded_images.append(upload_path)

@@ -133,6 +133,7 @@ class PipelineOptions:
     expected_trend: str = "none"
     trend_min_value: float | None = None
     trend_max_value: float | None = None
+    image_layout: str = "auto"
     threshold_scope: str = "fixed"
     red_fixed_threshold: int = 80
     green_fixed_threshold: int = 80

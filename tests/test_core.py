@@ -13,6 +13,8 @@ from imagej_auto.models import PipelineOptions, RawMeasurement, ReplicateSummary
 from imagej_auto.pipeline import (
     build_result_payload,
     copy_image_inputs,
+    detect_montage_layout,
+    prepare_direct_image_inputs,
     run_pipeline_from_images,
     validate_threshold_results,
 )
@@ -82,10 +84,36 @@ class CoreWorkflowTests(unittest.TestCase):
                 path.write_bytes(b"image")
                 sources.append(path)
             with patch("imagej_auto.pipeline._run_prepared_images", return_value={"ok": True}) as run_mock:
-                result = run_pipeline_from_images(sources, root / "out", PipelineOptions())
-            self.assertEqual(result, {"ok": True})
+                result = run_pipeline_from_images(sources, root / "out", PipelineOptions(image_layout="triplets"))
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["image_layout_detection"]["mode"], "triplets")
             self.assertEqual(run_mock.call_args.kwargs["input_type"], "images")
             self.assertTrue(run_mock.call_args.args[0].joinpath("input_manifest.json").exists())
+
+    def test_montage_detection_splits_six_groups_and_three_channels(self):
+        from PIL import Image, ImageDraw
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "montage.png"
+            image = Image.new("RGB", (720, 390), "white")
+            draw = ImageDraw.Draw(image)
+            for column in range(6):
+                for row in range(3):
+                    left = 10 + column * 118
+                    top = 15 + row * 125
+                    draw.rectangle((left, top, left + 95, top + 100), fill=(5, 5, 5))
+            image.save(source)
+
+            detected = detect_montage_layout(source)
+            self.assertIsNotNone(detected)
+            self.assertEqual(detected["columns"], 6)
+            self.assertEqual(detected["rows"], 3)
+
+            cropped, metadata = prepare_direct_image_inputs([source], root / "extracted", image_layout="auto")
+            self.assertEqual(len(cropped), 18)
+            self.assertEqual(metadata["mode"], "montage")
+            self.assertEqual(metadata["detected_columns"], 6)
 
     def test_fixed_threshold_validation_checks_actual_imagej_values(self):
         options = PipelineOptions(

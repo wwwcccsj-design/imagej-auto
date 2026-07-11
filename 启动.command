@@ -11,4 +11,8 @@ else
 fi
 
 cd "$DIR"
+if ! "$PYTHON" -c "import PIL" >/dev/null 2>&1; then
+  echo "正在安装图片布局识别依赖..."
+  "$PYTHON" -m pip install -r requirements.txt
+fi
 "$PYTHON" run_app.py
